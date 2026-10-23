@@ -1,0 +1,284 @@
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <tlhelp32.h>
+
+#include <iostream>
+#include <memory>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "app.h"
+#include "commands.h"
+
+namespace lp {
+namespace {
+
+constexpr ULONG_PTR kSelfMarker = 0x4C50494E;  // "LPIN" in dwExtraInfo marks our own SendInput events
+constexpr UINT kWmCommand = WM_APP + 1;
+constexpr UINT kWmInject = WM_APP + 2;
+
+Decision* g_decision = nullptr;
+Output* g_out = nullptr;
+DWORD g_hookThreadId = 0;
+// Injects waiting to run on the hook thread's message loop. Hook callbacks and that loop share one
+// thread, so no lock is needed; only that thread touches this.
+std::vector<Inject> g_pendingInjects;
+
+bool isExtendedVk(uint32_t vk) {
+  switch (vk) {
+    case VK_RMENU: case VK_RCONTROL: case VK_LWIN: case VK_RWIN: case VK_INSERT: case VK_DELETE:
+    case VK_HOME: case VK_END: case VK_PRIOR: case VK_NEXT: case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool isKeyDown(uint32_t vk) { return (GetAsyncKeyState(static_cast<int>(vk)) & 0x8000) != 0; }
+
+// True when the click at (x, y) lands on a monitor that the foreground window covers whole: a game, or any
+// fullscreen app, owns that screen, so trigger+click belongs to it, not to a wheel. A click on another
+// monitor still gestures. "Covers" means the window rect contains the monitor rect: borderless fullscreen
+// equals it, and CS2's fullscreen window is a maximized SDL window that keeps WS_CAPTION and overflows it.
+// A maximized normal window stops at the work area, unless the monitor reserves none (auto-hide taskbar,
+// or no taskbar on that display): there only caption-less windows count, so CS2-style windows are missed.
+// Shell surfaces (desktop, taskbar) are excluded. No cross-process calls: safe inside the hook callback.
+bool clickIsOnFullscreenApp(int x, int y) {
+  const HWND fg = GetForegroundWindow();
+  if (fg == nullptr) return false;
+  wchar_t cls[64];
+  if (GetClassNameW(fg, cls, 64) != 0 &&
+      (lstrcmpiW(cls, L"Progman") == 0 || lstrcmpiW(cls, L"WorkerW") == 0 || lstrcmpiW(cls, L"Shell_TrayWnd") == 0))
+    return false;
+  const HMONITOR mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+  if (mon == nullptr || mon != MonitorFromPoint(POINT{x, y}, MONITOR_DEFAULTTONEAREST)) return false;
+  RECT wr;
+  MONITORINFO mi{};
+  mi.cbSize = sizeof(mi);
+  if (!GetWindowRect(fg, &wr) || !GetMonitorInfoW(mon, &mi)) return false;
+  const RECT& m = mi.rcMonitor;
+  if (wr.left > m.left || wr.top > m.top || wr.right < m.right || wr.bottom < m.bottom) return false;
+  if (EqualRect(&mi.rcWork, &m)) return (GetWindowLongPtrW(fg, GWL_STYLE) & WS_CAPTION) != WS_CAPTION;
+  return true;
+}
+
+void sendInjects(const std::vector<Inject>& injects) {
+  std::vector<INPUT> inputs;
+  for (const auto& i : injects) {
+    INPUT in{};
+    if (i.kind == InjectKind::ButtonDown || i.kind == InjectKind::ButtonUp) {
+      const bool down = i.kind == InjectKind::ButtonDown;
+      in.type = INPUT_MOUSE;
+      in.mi.dwExtraInfo = kSelfMarker;
+      switch (i.btn) {
+        case Btn::Left: in.mi.dwFlags = down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP; break;
+        case Btn::Right: in.mi.dwFlags = down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP; break;
+        case Btn::Middle: in.mi.dwFlags = down ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP; break;
+        case Btn::X1:
+          in.mi.dwFlags = down ? MOUSEEVENTF_XDOWN : MOUSEEVENTF_XUP;
+          in.mi.mouseData = XBUTTON1;
+          break;
+        case Btn::X2:
+          in.mi.dwFlags = down ? MOUSEEVENTF_XDOWN : MOUSEEVENTF_XUP;
+          in.mi.mouseData = XBUTTON2;
+          break;
+        default:
+          continue;
+      }
+    } else {
+      in.type = INPUT_KEYBOARD;
+      in.ki.wVk = static_cast<WORD>(i.vk);
+      in.ki.wScan = static_cast<WORD>(MapVirtualKeyW(i.vk, MAPVK_VK_TO_VSC));  // games read scan codes
+      in.ki.dwFlags = (i.kind == InjectKind::KeyUp ? KEYEVENTF_KEYUP : 0u) | (isExtendedVk(i.vk) ? KEYEVENTF_EXTENDEDKEY : 0u);
+      in.ki.dwExtraInfo = kSelfMarker;
+    }
+    inputs.push_back(in);
+  }
+  if (!inputs.empty()) SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
+}
+
+// SendInput from inside a low-level hook callback deadlocks against this very hook: the injected
+// events must pass the hook chain again, and the thread that serves it is the one blocked inside
+// SendInput. Every input event system-wide then waits out the hook timeout, freezing the cursor.
+// So injects are queued here and run by the message loop (kWmInject) once the callback has returned.
+void queueInjects(const std::vector<Inject>& injects) {
+  if (injects.empty()) return;
+  g_pendingInjects.insert(g_pendingInjects.end(), injects.begin(), injects.end());
+  PostThreadMessageW(g_hookThreadId, kWmInject, 0, 0);
+}
+
+void drainInjects() {
+  if (g_pendingInjects.empty()) return;
+  std::vector<Inject> batch;
+  batch.swap(g_pendingInjects);
+  sendInjects(batch);
+}
+
+// Reports emits, queues injections for the message loop, and returns whether to swallow the event.
+bool apply(const Result& r) {
+  for (const auto& e : r.emits) g_out->emit(e);
+  queueInjects(r.injects);
+  return r.swallow;
+}
+
+// Like apply(), for a real button or key event. Injects still in the queue were decided for earlier events,
+// so passing this one through now would let it overtake them: a replayed press landing after its real
+// release leaves the button stuck down. Such an event is swallowed and replayed behind the queue instead.
+bool applyInOrder(const InputEvent& e, const Inject& replay) {
+  const bool behind = !e.selfInjected && !g_pendingInjects.empty();
+  if (apply(g_decision->onEvent(e))) return true;
+  if (!behind) return false;
+  queueInjects({replay});
+  return true;
+}
+
+LRESULT CALLBACK mouseProc(int code, WPARAM wParam, LPARAM lParam) {
+  if (code == HC_ACTION) {
+    const auto* m = reinterpret_cast<const MSLLHOOKSTRUCT*>(lParam);
+    InputEvent e;
+    e.x = m->pt.x;
+    e.y = m->pt.y;
+    e.timeMs = GetTickCount64();
+    e.selfInjected = (m->flags & LLMHF_INJECTED) != 0 && m->dwExtraInfo == kSelfMarker;
+    bool known = true;
+    switch (wParam) {
+      case WM_MOUSEMOVE: e.kind = EvKind::MouseMove; break;
+      case WM_LBUTTONDOWN: e.kind = EvKind::MouseDown; e.btn = Btn::Left; break;
+      case WM_LBUTTONUP: e.kind = EvKind::MouseUp; e.btn = Btn::Left; break;
+      case WM_RBUTTONDOWN: e.kind = EvKind::MouseDown; e.btn = Btn::Right; break;
+      case WM_RBUTTONUP: e.kind = EvKind::MouseUp; e.btn = Btn::Right; break;
+      case WM_MBUTTONDOWN: e.kind = EvKind::MouseDown; e.btn = Btn::Middle; break;
+      case WM_MBUTTONUP: e.kind = EvKind::MouseUp; e.btn = Btn::Middle; break;
+      case WM_XBUTTONDOWN:
+      case WM_XBUTTONUP:
+        e.kind = wParam == WM_XBUTTONDOWN ? EvKind::MouseDown : EvKind::MouseUp;
+        e.btn = HIWORD(m->mouseData) == XBUTTON1 ? Btn::X1 : Btn::X2;
+        break;
+      default:
+        known = false;
+    }
+    if (known && e.kind == EvKind::MouseDown) g_decision->syncKeyStates(isKeyDown);
+    if (known) {
+      // Moves may overtake queued injects: a replayed press just lands at the newer cursor position.
+      const bool swallow = e.kind == EvKind::MouseMove
+          ? apply(g_decision->onEvent(e))
+          : applyInOrder(e, {e.kind == EvKind::MouseDown ? InjectKind::ButtonDown : InjectKind::ButtonUp, e.btn});
+      if (swallow) return 1;
+    }
+  }
+  return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+LRESULT CALLBACK keyProc(int code, WPARAM wParam, LPARAM lParam) {
+  if (code == HC_ACTION) {
+    const auto* k = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lParam);
+    InputEvent e;
+    e.kind = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) ? EvKind::KeyDown : EvKind::KeyUp;
+    e.vk = k->vkCode;
+    e.timeMs = GetTickCount64();
+    e.selfInjected = (k->flags & LLKHF_INJECTED) != 0 && k->dwExtraInfo == kSelfMarker;
+    if (applyInOrder(e, {e.kind == EvKind::KeyDown ? InjectKind::KeyDown : InjectKind::KeyUp, Btn::None, e.vk})) return 1;
+  }
+  return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+// The process that started us, opened for waiting; null if it is already gone. Its creation time must precede
+// ours: a PID can be reused once its process exits.
+HANDLE openParent() {
+  const HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap == INVALID_HANDLE_VALUE) return nullptr;
+  DWORD parentPid = 0;
+  PROCESSENTRY32W pe{};
+  pe.dwSize = sizeof(pe);
+  for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
+    if (pe.th32ProcessID == GetCurrentProcessId()) {
+      parentPid = pe.th32ParentProcessID;
+      break;
+    }
+  }
+  CloseHandle(snap);
+  const HANDLE parent = parentPid != 0 ? OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, parentPid) : nullptr;
+  if (parent == nullptr) return nullptr;
+  FILETIME parentStart, ownStart, unused1, unused2, unused3;
+  if (!GetProcessTimes(parent, &parentStart, &unused1, &unused2, &unused3) ||
+      !GetProcessTimes(GetCurrentProcess(), &ownStart, &unused1, &unused2, &unused3) ||
+      CompareFileTime(&parentStart, &ownStart) > 0) {
+    CloseHandle(parent);
+    return nullptr;
+  }
+  return parent;
+}
+
+// Electron is gone: ask the hook thread to quit, and if it hasn't within 2 s (wedged in a hook callback),
+// end the process. A helper left behind keeps its global hooks and slows every input event.
+void quitWhenOrphaned(DWORD hookThreadId) {
+  PostThreadMessageW(hookThreadId, WM_QUIT, 0, 0);
+  Sleep(2000);
+  TerminateProcess(GetCurrentProcess(), 0);
+}
+
+}  // namespace
+
+int runHooks(Output& out) {
+  Decision decision;
+  g_decision = &decision;
+  g_out = &out;
+  decision.setFullscreenProbe(clickIsOnFullscreenApp);
+  const DWORD threadId = GetCurrentThreadId();
+  g_hookThreadId = threadId;
+  MSG msg;
+  PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);  // make sure this thread has a queue
+
+  HHOOK mouseHook = SetWindowsHookExW(WH_MOUSE_LL, mouseProc, GetModuleHandleW(nullptr), 0);
+  HHOOK keyHook = SetWindowsHookExW(WH_KEYBOARD_LL, keyProc, GetModuleHandleW(nullptr), 0);
+  if (mouseHook == nullptr || keyHook == nullptr) {
+    out.error("SetWindowsHookEx failed with error " + std::to_string(GetLastError()));
+    return 2;
+  }
+  SetTimer(nullptr, 0, 1000, nullptr);  // watchdog tick
+
+  std::thread reader([threadId] {
+    std::string line;
+    while (std::getline(std::cin, line)) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      auto* text = new std::string(std::move(line));
+      if (!PostThreadMessageW(threadId, kWmCommand, 0, reinterpret_cast<LPARAM>(text))) delete text;
+    }
+    quitWhenOrphaned(threadId);  // stdin closed: Electron is gone
+  });
+  reader.detach();
+  // stdin alone can miss Electron's death: another process may hold the pipe open.
+  if (const HANDLE parent = openParent()) {
+    std::thread([threadId, parent] {
+      WaitForSingleObject(parent, INFINITE);
+      quitWhenOrphaned(threadId);
+    }).detach();
+  }
+  out.ready();
+
+  while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+    if (msg.message == WM_TIMER) {
+      decision.syncKeyStates(isKeyDown);
+      apply(decision.tick(GetTickCount64()));
+    } else if (msg.message == kWmInject) {
+      drainInjects();
+    } else if (msg.message == kWmCommand) {
+      std::unique_ptr<std::string> text(reinterpret_cast<std::string*>(msg.lParam));
+      const Command c = parseCommand(*text, decision.config());
+      switch (c.kind) {
+        case Command::Kind::Config: apply(decision.setConfig(c.config)); break;
+        case Command::Kind::SetEnabled: apply(decision.setEnabled(c.flag)); break;
+        case Command::Kind::Suspend: apply(decision.setSuspended(c.flag)); break;
+        case Command::Kind::Shutdown: PostQuitMessage(0); break;
+        default: out.error("invalid command: " + *text); break;
+      }
+    }
+  }
+  UnhookWindowsHookEx(mouseHook);
+  UnhookWindowsHookEx(keyHook);
+  return 0;
+}
+
+}  // namespace lp

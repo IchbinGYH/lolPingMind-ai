@@ -1,0 +1,175 @@
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, expect, it, vi } from 'vitest';
+import { SettingsStore } from '../../src/main/settingsStore';
+import { DEFAULT_SETTINGS, type Settings } from '../../src/shared/settings';
+
+const tempDir = () => mkdtempSync(join(tmpdir(), 'lolping-'));
+/** Waits for the save load() scheduled on its own to reach disk: a fixed sleep raced slow CI runners. */
+const savedTagColor = (dir: string, color: number) =>
+  vi.waitFor(() => expect(JSON.parse(readFileSync(join(dir, 'settings.json'), 'utf8')).tagColor).toBe(color), { timeout: 3000 });
+
+describe('SettingsStore', () => {
+  it('uses defaults when there is no file', () => {
+    const store = new SettingsStore(tempDir());
+    expect(store.load()).toEqual(DEFAULT_SETTINGS);
+    expect(store.problems).toEqual([]);
+  });
+
+  it('backs up a corrupt file and falls back to defaults', () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, 'settings.json'), '{ not json');
+    const store = new SettingsStore(dir);
+    expect(store.load()).toEqual(DEFAULT_SETTINGS);
+    expect(readFileSync(join(dir, 'settings.bak.json'), 'utf8')).toBe('{ not json');
+    expect(store.problems).toHaveLength(1);
+  });
+
+  it('saves the defaults it filled in, so the tag colour stays the same on the next launch', async () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify({ version: 1, volume: 30 })); // a 0.2.1 file: no room keys
+    const first = new SettingsStore(dir, 10, 'win', { name: 'darren', color: 3 }).load();
+    await savedTagColor(dir, 3);
+    const second = new SettingsStore(dir, 10, 'win', { name: 'darren', color: 6 }).load();
+    expect([first.tagColor, second.tagColor]).toEqual([3, 3]);
+    expect(second.volume).toBe(30);
+  });
+
+  it('saves on the very first run too', async () => {
+    const dir = tempDir();
+    new SettingsStore(dir, 10, 'win', { name: 'darren', color: 2 }).load();
+    await savedTagColor(dir, 2);
+    expect(new SettingsStore(dir, 10, 'win', { name: 'darren', color: 7 }).load().tagColor).toBe(2);
+  });
+
+    it('normalizes values read from disk', () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify({ volume: 900, trigger: 'ctrl' }));
+    const s = new SettingsStore(dir).load();
+    expect(s.volume).toBe(100);
+    expect(s.trigger).toBe('ctrl');
+  });
+
+  it('flags an emote key clash from a hand-edited file', () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify({ trigger: 'ctrl', emoteTrigger: 'ctrl' }));
+    const store = new SettingsStore(dir);
+    expect(store.load().emoteTrigger).toBe('off');
+    expect(store.emoteKeyClashed).toBe(true);
+  });
+
+  it('does not flag an upgrading Ctrl user, whose emote key just ends up off', () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify({ trigger: 'ctrl' })); // a 0.4.0 file: no emote keys
+    const store = new SettingsStore(dir);
+    expect(store.load().emoteTrigger).toBe('off');
+    expect(store.emoteKeyClashed).toBe(false);
+  });
+
+  it('does not flag an emote key that was already off, or one without a clash', () => {
+    for (const file of [{ trigger: 'ctrl', emoteTrigger: 'off' }, { trigger: 'alt', emoteTrigger: 'ctrl' }, {}]) {
+      const dir = tempDir();
+      writeFileSync(join(dir, 'settings.json'), JSON.stringify(file));
+      const store = new SettingsStore(dir);
+      store.load();
+      expect(store.emoteKeyClashed).toBe(false);
+    }
+  });
+
+  it('flags a clash with the pause key too', () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify({ emoteTrigger: { vk: 0x50 } }));
+    const store = new SettingsStore(dir);
+    store.load();
+    expect(store.emoteKeyClashed).toBe(true);
+  });
+
+  it('saves the emote fields it filled in for an older file', async () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify({ version: 1, volume: 30 }));
+    new SettingsStore(dir, 10).load();
+    await vi.waitFor(() => expect(JSON.parse(readFileSync(join(dir, 'settings.json'), 'utf8'))).toMatchObject({
+      emoteTrigger: 'ctrl', emoteSizePx: 150, customEmotes: [], assistantProvider: 'codex', assistantMode: 'all',
+    }), { timeout: 3000 });
+  });
+
+  it('emits change with the normalized value', () => {
+    const store = new SettingsStore(tempDir());
+    store.load();
+    let seen: Settings | null = null;
+    store.on('change', (s: Settings) => {
+      seen = s;
+    });
+    const result = store.update({ pingSizePx: 10 });
+    expect(result.pingSizePx).toBe(60);
+    expect(seen).toEqual(result);
+    expect(store.get()).toEqual(result);
+  });
+
+  it('flushes atomically and round-trips', async () => {
+    const dir = tempDir();
+    const store = new SettingsStore(dir);
+    store.load();
+    store.update({ volume: 33, clickPing: true, wheelSizePx: 450 });
+    await store.flush();
+    expect(existsSync(join(dir, 'settings.json.tmp'))).toBe(false);
+    const again = new SettingsStore(dir).load();
+    expect(again.volume).toBe(33);
+    expect(again.clickPing).toBe(true);
+    expect(again.wheelSizePx).toBe(450);
+  });
+
+  it('debounces writes and keeps the last value', async () => {
+    const dir = tempDir();
+    const store = new SettingsStore(dir, 60);
+    vi.useFakeTimers();
+    try {
+      store.load();
+      store.update({ volume: 10 });
+      store.update({ volume: 20 });
+      await vi.advanceTimersByTimeAsync(25);
+      expect(existsSync(join(dir, 'settings.json'))).toBe(false);
+      await vi.advanceTimersByTimeAsync(35);
+      await vi.waitFor(() => expect(JSON.parse(readFileSync(join(dir, 'settings.json'), 'utf8')).volume).toBe(20),
+        { timeout: 3000 });
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('still falls back to defaults when the corrupt file cannot be backed up', () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, 'settings.json'), '{ not json');
+    mkdirSync(join(dir, 'settings.bak.json')); // a directory in the way makes copyFileSync fail
+    const store = new SettingsStore(dir);
+    let loaded: Settings | undefined;
+    expect(() => {
+      loaded = store.load();
+    }).not.toThrow();
+    expect(loaded).toEqual(DEFAULT_SETTINGS);
+    expect(store.problems).toHaveLength(1);
+    expect(store.problems[0]).toContain('could not be backed up');
+  });
+
+  it('records a failed save in problems and leaves no .tmp behind', async () => {
+    const dir = tempDir();
+    mkdirSync(join(dir, 'settings.json')); // rename onto a directory always fails
+    const store = new SettingsStore(dir);
+    store.update({ volume: 5 });
+    await expect(store.flush()).resolves.toBeUndefined();
+    expect(store.problems.some((p) => p.startsWith('Could not save settings'))).toBe(true);
+    expect(existsSync(join(dir, 'settings.json.tmp'))).toBe(false);
+  });
+
+  it.skipIf(process.platform !== 'win32')('retries a transient rename failure (EPERM on Windows)', async () => {
+    const dir = tempDir();
+    const target = join(dir, 'settings.json');
+    mkdirSync(target); // Windows reports EPERM for rename-onto-directory, a retryable code
+    setTimeout(() => rmSync(target, { recursive: true }), 20); // the "antivirus lock" clears before the retry
+    const store = new SettingsStore(dir);
+    store.update({ volume: 44 });
+    await store.flush();
+    expect(store.problems).toEqual([]);
+    expect(JSON.parse(readFileSync(target, 'utf8')).volume).toBe(44);
+    expect(existsSync(`${target}.tmp`)).toBe(false);
+  });
+});

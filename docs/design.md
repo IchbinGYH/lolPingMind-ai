@@ -1,0 +1,388 @@
+# lolPingMind-ai — Design Spec
+
+lolPingMind-ai is an AI screen assistant derived from [lolPing](https://github.com/darrenprx/lolPing). The original design history below is retained; §14 describes the fork's current screen actions and branding.
+
+**Date:** 2026-10-01
+**Status:** Implemented in v0.1.0; wheel customization (Bait, Vision Cleared, drag-and-drop slots) added in v0.2.1; rooms over LAN added in v0.3.0 (§12); emotes added in v0.5.0 (§13); foreign-chord pass-through and the fullscreen pause added in v0.5.1; custom emote stills travelling between room members added in v0.5.2 (§13)
+
+## 1. Purpose
+
+A personal desktop toy for Windows that recreates League of Legends' ping wheel anywhere on the desktop. Hold the trigger key (Alt by default), drag, and a League-style ping wheel opens. Release on a slice to drop that ping, with its animation and its original sound, at the point where the wheel opened.
+
+- **Audience:** a single user on their own machine. Since v0.3.0, users on the same network can also join a room and see each other's pings (§12).
+- **Capture:** pings must appear in whole-screen capture (Discord "Screen", OBS Display Capture, screenshots). Single-window capture is not supported.
+- **Success criteria:**
+  1. Alt+drag opens the wheel over any normal app without that app receiving the drag.
+  2. Releasing on a slice shows the ping with animation and sound with no noticeable delay.
+  3. With the option off, Alt+click behaves as it did without lolPing.
+  4. A hotkey turns everything on and off.
+  5. The settings UI follows Fluent design.
+
+## 2. Decisions log
+
+| Topic | Decision |
+|---|---|
+| Platform | Windows 11 only, multi-monitor, mixed DPI (user has two displays) |
+| Stack | Electron (TypeScript) + React + Fluent UI React v9 for the UI. A small native C++ helper handles global input. |
+| Default trigger | Hold **Alt** and drag with the left mouse button to open the wheel. |
+| Trigger + click (no drag) | Configurable, **off** by default. Off: the click passes through untouched. On: it places a **generic** ping and the click is swallowed. |
+| Toggle | A global hotkey (default **Ctrl+Alt+P**) turns pinging on/off, mirrored in the tray. |
+| Wheel slots | 8 slices, top then clockwise. Default: Danger, Push, On My Way, All In, Assist Me, Need Vision, Enemy Missing, Enemy Vision. The user can drag any of the 11 pings onto any slot, and pick the trigger+click ping (default Generic), in settings. |
+| Excluded pings | Defend/Hold, Target, the yellow "caution" circle: they need a target, so they wait until lolPing can pick one |
+| Textures | Only standard textures. **Never colourblind (`_cb`) variants.** |
+| Sound | Original League sounds, extracted from the user's local install |
+
+## 3. Assets
+
+The assets are already extracted into the repo and ship with the app. They come from the user's local League install and are © Riot Games. The project will be published on GitHub with the assets bundled; the owner accepts the risk and will take it down if Riot asks.
+
+### 3.1 Ping table (single source of truth: `src/shared/pings.ts`)
+
+Slot is the default layout (`DEFAULT_WHEEL`); the user can rearrange it.
+
+| id | Slot | Wheel icon (`assets/textures/`) | On-screen art | Sound (`assets/sounds/`) | Ring colour |
+|---|---|---|---|---|---|
+| `danger` | N | `pingwheel_retreatrender.png` | `pingwheel_retreatrender.png` | `SRP_12.wav` | `#ff3b55` |
+| `push` | NE | `push.png` | `pingwheel_pushrender.png` | `SRP_9.wav` | `#35d27a` |
+| `omw` | E | `omw.png` | `omw.png` (upright icon; the flat `omw` ground render looks wrong) | `OnMyWay.wav` | `#2e8bff` |
+| `allin` | SE | `all_in.png` | `pingwheel_allin_render_01.png` + `_02.png` (two halves that clash together) | `SRP_4.wav` | `#f2b320` |
+| `assist` | S | `assist_me.png` | `assist_me.png` | `ComeHere.wav` | `#56d43c` |
+| `needvision` | SW | `need_vision.png` | `need_vision.png` | `SRP_7.wav` | `#56d43c` |
+| `missing` | W | `enemy_missing.png` | `enemy_missing.png` | `MIA.wav` | `#f2c518` |
+| `enemyvision` | NW | `pingwheel_enemyvisionrender.png` | `pingwheel_enemyvisionrender.png` | `AreaIsWarded.wav` | `#ff3b55` |
+| `generic` | (trigger+click) | `generic_ping.png` | `pingwheel_basicpingrender.png` | `Base.wav` | `#2e8bff` |
+| `bait` | — | `pingwheel_baitrender.png` | `pingwheel_baitrender.png` (the hook; also used as the icon) | `SRP_11.wav` | `#efbc12` |
+| `visioncleared` | — | `vision_cleared.png` | `pingwheel_visionclearedrender.png` | `SRP_6.wav` | `#2b80ff` |
+| `missingflip` | — | `enemy_missing_flipped.png` | `enemy_missing_flipped.png` (`enemy_missing` turned 180°, made by `--derived`; not a League ping) | `MIA.wav` | `#f2c518` |
+| wheel tick | — | — | — | `button.wav` | — |
+
+Unused extracted files stay in `assets/` but are never referenced: the `_cb` textures, `enemy_vision` (magenta, like the colourblind set; the wheel uses the red render), `caution`, `hold`, `target`, the `pingwheel_*` renders not listed above, and the other sounds (`SRP_13.wav` is the structure-defend ping).
+
+### 3.2 Asset pipeline (already run; kept reproducible)
+
+The extraction scripts live in `tools/extract-assets/`, together with a README. Each step:
+
+1. **Textures:** DDS (DXT5) → PNG with Pillow. Bait and Vision Cleared come straight from League's `.tex` files in `Global.wad.client` (`--wad-textures`).
+   No game file maps those two pings to their sounds; `SRP_11` (Bait) and `SRP_6` (Vision Cleared) were identified by ear.
+2. **Sound banks:** read the WAD v3 table of contents with a small Python reader (Python 3.14 has built-in zstd). Names come from CommunityDragon's `hashes.game.txt` list, filtered to sound banks. The ping banks are in `DATA/FINAL/Maps/Shipping/Common.wad.client`:
+   - `assets/sounds/wwise2016/sfx/shared/hud_global_events.bnk`
+   - `assets/sounds/wwise2016/sfx/shared/hud_global_audio.bnk`
+3. **Event → clip mapping:**
+   - Event names (`Play_sfx_hud_base_Pings_*`) come from string search in the game's `.bin` files.
+   - The bank's HIRC section is walked from event → action → layer container → sound → embedded WEM id.
+   - The event id is the FNV-1 32-bit hash of the lower-cased event name.
+4. **Decoding:** the clips are Wwise Vorbis (`0xFFFF`), decoded with `vgmstream-cli` (r2117).
+5. **Mixing:** layer containers play their children at the same time. They are mixed with ffmpeg `amix` plus `alimiter` (limit −1 dB) to avoid clipping. Each file has at most 35 ms of silence at the start.
+
+## 4. Architecture
+
+```
+┌──────────────────────────── Electron app ────────────────────────────┐
+│ main process                                                         │
+│  ├─ InputBridge     spawns/supervises hook-helper.exe, JSON lines    │
+│  ├─ OverlayManager  one transparent overlay window per display       │
+│  ├─ SettingsStore   %APPDATA%\lolPing\settings.json, pushes changes  │
+│  ├─ Tray            enable/disable, settings, quit, status icon      │
+│  └─ SettingsWindow  React + Fluent UI v9, Mica backdrop              │
+│ overlay renderer (per display): wheel + ping animations + Web Audio  │
+└───────────────▲──────────────────────────────────────────────────────┘
+                │ stdin: config/commands   stdout: input events (JSON lines)
+┌───────────────┴───────────────┐
+│ hook-helper.exe (C++ / Win32) │  WH_MOUSE_LL + WH_KEYBOARD_LL on a
+│ no runtime deps, per-monitor  │  dedicated thread with its own message
+│ DPI aware v2                  │  loop; decides pass-through vs swallow
+└───────────────────────────────┘
+```
+
+**Why a separate helper process:**
+- Only a low-level hook can swallow the Alt+drag so the app underneath doesn't drag or select text. Node global-hook libraries can only listen.
+- Windows silently removes a low-level hook that responds slowly, so it can't live on Electron's busy main thread.
+- A tiny dedicated process responds in microseconds and is isolated from renderer and GC pauses.
+
+### 4.1 Repository layout
+
+```
+lolPing/
+  package.json                 electron-vite + electron-builder
+  electron.vite.config.ts
+  src/
+    main/                      index.ts, inputBridge.ts, restartPolicy.ts, overlayManager.ts,
+                               settingsStore.ts, settingsIpc.ts, settingsWindow.ts, tray.ts,
+                               coords.ts, paths.ts, appProtocol.ts, safePath.ts
+    preload/                   overlay.ts, settings.ts  (contextBridge APIs)
+    renderer/
+      overlay/                 index.html, main.ts, wheel.ts, pingFx.ts, soundBank.ts, toast.ts, overlay.css
+      settings/                index.html, App.tsx, useAppState.ts, components/ (Fluent UI)
+    shared/                    pings.ts, settings.ts (schema + defaults), keys.ts,
+                               protocol.ts (helper messages), ipc.ts, geometry.ts
+  native/hook-helper/          build.cmd (MSVC via vswhere), build.sh (macOS), run.mjs, src/ main_win.cpp,
+                               hooks_win.cpp, simulate.cpp, decision.{h,cpp} (pure logic), commands, json, output,
+                               macOS: main_posix.cpp, hooks_mac.cpp, macinput.{h,cpp}; tests/
+  assets/textures, assets/sounds
+  tools/extract-assets/
+  prototype/                   throwaway demos (wheel-demo.html, settings-demo.html)
+  docs/design.md               this document
+```
+
+## 5. Hook helper
+
+### 5.1 Input decision logic (pure, unit-tested state machine in `decision.cpp`)
+
+States: `Idle`, `Pending` (trigger held + button down, not yet moved past the threshold), `Wheel` (wheel open).
+
+| Situation | Action |
+|---|---|
+| Disabled | Pass everything through; only the toggle hotkey is checked |
+| Mouse down that would start a gesture, `gameCheck` on and the foreground window fullscreen on the clicked monitor (its rect contains the monitor; where the monitor reserves no work area, only caption-less windows count; desktop and taskbar excluded; Windows only) | Pass through; the fullscreen app keeps every click |
+| Left button down while trigger held | **Swallow**, record the point, go to `Pending` |
+| `Pending`, movement > `dragThresholdPx` | Send `wheelOpen{x,y}` with the *press* point, go to `Wheel` |
+| `Wheel`, mouse move | Send `wheelMove{x,y}`. Movement is not swallowed, so the cursor still moves. |
+| `Wheel`, left button up | **Swallow**, send `wheelRelease{x,y}`, go to `Idle` |
+| `Pending`, left button up (trigger+click) | Option on: **swallow**, send `click{x,y}`. Option off: **replay** the down+up with `SendInput` (flagged as injected so the helper ignores its own events). Back to `Idle`. |
+| `Wheel`, right button down or Esc | **Swallow**, send `cancel`, go to `Idle` |
+| Trigger released during `Pending` | Treat as a plain click: replay it (or ping, if the option is on) |
+| Trigger released during `Wheel` | Nothing: the wheel stays open and the button up picks the slice, as in League. A trackpad's three-finger drag sends that up about a second late. |
+| Toggle hotkey | **Swallow**, flip enabled, send `toggled{enabled}`. If disabled mid-drag, also send `cancel`. |
+| Watchdog: no mouse event for 10 s while in `Wheel` or `Pending` | Send `cancel`, go to `Idle` |
+
+**Invariant:** for every swallowed button down, the paired up is also swallowed, or both are replayed. An app never sees an unmatched press.
+
+### 5.2 Modifier side effects
+
+- **Alt / Win menu activation.** Windows opens the menu bar (Alt) or Start menu (Win) when the key goes up without any other key in between. When a wheel or ping happened while the modifier was held, the helper injects a no-op "mask" key (`VK_NONAME`, 0xFC) before the modifier's key-up. AutoHotkey uses the same trick.
+- **Caps Lock as trigger:** its down/up is swallowed, so Caps state doesn't change.
+- **A custom key as trigger:** its down is held back. If a drag uses it, nothing is typed. A lone tap is replayed (down + up) when the key comes up, so it still types. Another key pressed while it is held sends it first and replays that key behind it, so fast typing keeps its order. A held custom key doesn't auto-repeat until another key flushes it.
+- **Mouse 4 / Mouse 5 as trigger:** the side button itself is the drag button (press side button, move, release). A side-button click without movement is replayed so browser Back/Forward still works, or it pings if the trigger+click option is on.
+
+### 5.3 Protocol (JSON lines, defined once in `src/shared/protocol.ts`, mirrored in C++)
+
+All coordinates are **physical screen pixels**.
+
+- **Electron → helper (stdin):** one *flat* JSON object per line (the helper's tiny parser accepts no nesting).
+  - `{"type":"config","trigger":"alt"|"ctrl"|"shift"|"win"|"capslock"|"mouse4"|"mouse5"|"vk","triggerVk":N,"clickPing":bool,"dragThresholdPx":N,"toggleMods":N,"toggleVk":N,"enabled":bool}`
+    - `toggleMods` is a bitmask: Ctrl = 1, Alt = 2, Shift = 4, Win = 8. `triggerVk` is used only when `trigger` is `"vk"` (custom key).
+  - `{"type":"setEnabled","enabled":bool}`
+  - `{"type":"suspend","on":bool}`: while the settings window is capturing a new shortcut, pass all input through and ignore the toggle hotkey.
+  - `{"type":"shutdown"}`
+  - Test mode only (`hook-helper.exe --simulate`, no OS hooks): `{"type":"sim","ev":"mdown"|"mup"|"move"|"kdown"|"kup"|"tick","btn":"left"|"right"|"middle"|"x1"|"x2","x":N,"y":N,"vk":N,"t":ms,"self":bool}`. After each one the helper also prints `{"type":"sim","swallow":bool,"inject":"down:left,up:left,…"}`.
+- **Helper → Electron (stdout):**
+  - `{"type":"ready","version":1}`
+  - `{"type":"wheelOpen","x":N,"y":N}`, `{"type":"wheelMove","x":N,"y":N}`, `{"type":"wheelRelease","x":N,"y":N}`
+  - `{"type":"click","x":N,"y":N}`, `{"type":"cancel"}`, `{"type":"toggled","enabled":bool}`
+  - `{"type":"error","message":"..."}`, e.g. a hotkey conflict, so the UI can report it
+- **Lifetime:** if stdin closes (EOF), meaning Electron died, the helper removes its hooks and exits. The helper never outlives the app.
+
+## 6. Electron main process
+
+- **Single instance:** a second launch opens the settings window instead.
+- **InputBridge:**
+  - Spawns `hook-helper.exe` (bundled via electron-builder `extraResources`), parses its JSON lines, and sends `config` on start and on every settings change.
+  - Restarts the helper with backoff (0.5 s, 1 s, 2 s). After 3 crashes within 60 s, it stops, sets the tray to a warning state and shows a toast.
+- **OverlayManager:**
+  - One `BrowserWindow` per display: `transparent`, `frame:false`, `focusable:false`, `skipTaskbar`, `alwaysOnTop` at level `screen-saver`, `setIgnoreMouseEvents(true)`, created with `showInactive()`.
+  - On Windows the level is set again each time an overlay gets something new to draw (`wheel:open`, `ping:spawn`, `emote:spawn`, `toast:show`), never on moves. Windows 10 users saw the overlay end up behind normal windows after a while, and only a restart fixed it. Setting the level again calls `SetWindowPos(HWND_TOPMOST)` without activating, which puts the overlay back above every window, other topmost ones included. macOS is unchanged: its panel stays on top.
+  - The windows cover each display's `bounds`, except that on Windows they stop one DIP short of the bottom edge. Explorer takes a shown window that covers a whole display for a full-screen app: it drops the taskbar behind it and won't slide an auto-hidden one up (`SHQueryUserNotificationState` reports `QUNS_BUSY`). Any smaller window doesn't count. The window still starts at the display's corner, so overlay coordinates don't change. They are rebuilt on `display-added`, `display-removed` and `display-metrics-changed`.
+  - Each event is routed to the overlay whose display contains the press point. A wheel near a screen edge may be clipped; it is not clamped, the same as in League.
+- **Coordinates:** `screen.screenToDipPoint({x,y})` converts physical pixels to DIP, then the display's DIP origin is subtracted to get overlay-local CSS pixels. Wheel moves are converted relative to the *wheel's* display, even when the cursor crosses onto another monitor.
+- **Toggle feedback:** tray icon state (normal or dimmed), the tray menu checkbox, and a small Fluent toast saying "Pings on" or "Pings off".
+- **Startup:** "Launch at Windows startup" uses `app.setLoginItemSettings` with the argument `--hidden`. A manual launch opens the settings window; a `--hidden` launch stays in the tray.
+
+## 7. Overlay renderer
+
+### 7.1 Wheel (matches the in-game reference screenshot and `prototype/wheel-demo.html`)
+
+**Geometry:** SVG centered on the press point.
+
+| Part | Size / style |
+|---|---|
+| Center disc | radius 86 px, teal radial gradient, 3 px gold ring `#c8aa6e` |
+| Ring | 8 wedges from radius 86 to 188 |
+| Cardinal wedges (N/E/S/W) | extend to radius 288 with a fading gradient |
+| Wedge dividers | thin gold-tinted lines |
+
+- **Slots:** each slice shows the ping from the `wheel` setting; the overlay redraws the icons when it changes.
+- **Center content:** the generic-ping icon, a "PING" label in `#1fa9e0`, and a dim "BACK" hint with a right-click mouse glyph.
+- **Icons:** 48 px at radius 137. Idle icons are desaturated gold (`grayscale(1) sepia(.75) saturate(1.3) brightness(1.15)`). The hovered slice shows the full-colour icon at 1.18× scale and a brightened wedge.
+- **Selection:**
+  - The slice is picked from the angle between the press point and the cursor, in 45° sectors centered on N, NE, …
+  - A distance under 86 px means nothing is selected; releasing there cancels.
+  - Moving onto a new slice plays `button.wav` at low volume, if the tick sound is enabled.
+- **Animation:** opens with fade + scale 0.85 → 1 over 120 ms, closes with a fade.
+
+### 7.2 Ping animation (as in the prototype)
+
+The default duration is 3.2 s and scales with the "ping duration" setting. The art is drawn at "ping size" (default 110 px) and anchored so the ground ellipse sits on the press point.
+
+1. **Pop:** scale 0.4 → 1.15 → 1.0 and fade in over 280 ms with an overshoot ease.
+2. **Rings:** coloured rings expand 0.25× → 1.35× and fade over 650 ms, at 0, 220 ms and 1.4 s.
+3. **Hold:** a gentle 5 px bob on a 1.6 s cycle, a coloured glow drop-shadow, and a soft coloured ground ellipse.
+4. **Fade out** over the last ~13% of the duration, then the element is removed.
+5. **All In:** the two halves slide in from opposite diagonals over 220 ms, then a white-to-colour flash and a 250 ms shake, then the bob.
+
+Several pings can be on screen at once, and each is independent.
+
+### 7.3 Audio
+
+- **Decoding:** all ping and tick sounds are decoded once into `AudioBuffer`s at overlay load, with `AudioContext({latencyHint:'interactive'})`.
+- **Playback:** each play is a fresh `AudioBufferSource` → `GainNode` (volume from settings). This removed the noticeable delay heard with `HTMLAudioElement` in the prototype.
+- **Autoplay:** Electron's `autoplayPolicy: 'no-user-gesture-required'` keeps the context running without a user gesture.
+- **No double sounds:** only the overlay that renders a ping plays its sound.
+
+## 8. Settings
+
+### 8.1 Schema (`src/shared/settings.ts`, versioned)
+
+| Key | Type | Default |
+|---|---|---|
+| `version` | number | 1 |
+| `enabledOnStart` | bool | true |
+| `trigger` | `alt`/`ctrl`/`shift`/`win`/`capslock`/`mouse4`/`mouse5`/`{vk}` | `alt` |
+| `dragThresholdPx` | 2–40 | 8 |
+| `clickPing` | bool | false |
+| `clickPingId` | ping id | `generic` |
+| `wheel` | 8 distinct ping ids, top then clockwise | `DEFAULT_WHEEL` (an invalid list resets to it) |
+| `toggleHotkey` | `{mods, vk}` | Ctrl+Alt+P |
+| `wheelSizePx` | 300–900, step 10 (both wheels) | 600 |
+| `pingSizePx` | 60–220 | 110 |
+| `pingDurationS` | 1.0–8.0 | 3.2 |
+| `keepLastPing` | bool: our newest ping (wheel or click) stays after its animation until our next ping on any display (`ping:unkeep` to the others), a pause, or the switch going off. Room pings and previews still fade. | false |
+| `volume` | 0–100 | 70 |
+| `muted` | bool | false |
+| `tickSound` | bool | true |
+| `launchAtStartup` | bool | false |
+
+Changes apply live, with no Save button. Writes are debounced (300 ms) and atomic (write a temp file, then rename).
+
+### 8.2 Settings window (matches `prototype/settings-demo.html`)
+
+- **Window:** Fluent UI React v9 components, `backgroundMaterial: 'mica'`, theme follows Windows light/dark, Windows 11 caption buttons, left navigation (Trigger, Toggle, Pings & sound, Wheel, App), Windows 11 Settings–style cards.
+- **Status card:** at the top, a master on/off switch with a live hint ("Hold Alt and drag… · Ctrl + Alt + P to turn off"). Turning it off dims the dependent cards.
+- **Trigger key:** a Fluent `Dropdown`, *not* a native select, with Keyboard and Mouse option groups plus "Custom key…", which captures the next key press.
+- **Toggle shortcut:** a key-capture field showing keycaps. Click it, press a combination, and it rebinds; Esc cancels. A conflict reported by the helper shows inline and keeps the old binding.
+- **Sliders:** drag distance, ping size, ping duration, volume. **Switches:** trigger+click ping, start enabled, tick sound, launch at startup.
+- **Wheel** (matches `prototype/wheel-editor-demo.html`): a small wheel with the 8 slots and the trigger+click ping in the centre, beside a tile per ping (no `_cb` textures).
+  - Clicking a tile previews it: plays its sound and spawns it at the center of the primary display.
+  - Drag a tile onto a slot to put it there; a ping already on the wheel swaps places instead, so no ping appears twice. Drag a slot onto another to swap them. Drop on the centre to set the click ping.
+  - Without dragging: click a tile or slot, then click where it goes. Esc cancels. "Reset to default" restores `DEFAULT_WHEEL` and Generic.
+  - The rules live in `src/shared/wheelLayout.ts` as pure functions.
+- **About:** version, asset notice, known limitations, asset problems, and "Open settings folder".
+
+### 8.3 Tray
+
+- **Left-click:** opens the settings.
+- **Right-click menu:** Enabled ✓ / Settings… / Quit.
+- **Icon states:** normal, dimmed (disabled), warning (helper failed).
+
+## 9. Error handling
+
+| Failure | Behaviour |
+|---|---|
+| Helper crashes or exits | Restart with backoff. After 3 in 60 s: stop, warning tray icon, toast, pinging paused until re-enabled. |
+| Electron hangs or dies | The helper sees stdin EOF, unhooks and exits, so input is never left captured. |
+| Stuck drag | 10 s watchdog in the helper sends `cancel`. Swallowed downs and ups are always paired. |
+| Missing or undecodable sound | That ping is silent; logged and listed in About. |
+| Missing texture | Fall back to `generic_ping.png`; logged and listed in About. |
+| Corrupt `settings.json` | Back it up as `settings.bak.json` and use defaults. |
+| Toggle hotkey conflict | Inline error in the settings; previous binding kept. |
+| Display change | Overlays rebuilt; an active wheel is cancelled. |
+
+**Known limitations** (listed in About):
+- Elevated (admin) windows such as Task Manager don't receive the hook, because Windows blocks it, so the wheel can't be triggered over them.
+- Exclusive-fullscreen games draw above the overlay.
+- Single-window screen capture doesn't include the overlay.
+
+## 10. Testing
+
+- **Vitest (TypeScript):**
+  - slice picking (sector boundaries at ±22.5°, dead-zone at 86 px, angle wrap)
+  - coordinate conversion across two displays with different scale factors
+  - settings defaults, clamping, migration, and corrupt-file fallback
+  - ping table integrity: every referenced asset file exists, no `_cb` file is referenced
+  - protocol message parsing
+- **C++ unit tests** for `decision.cpp` (no OS hooks), as table-driven event sequences:
+  - drag opens the wheel
+  - click with the option on and off
+  - trigger released early (before the wheel opens, and while it is open)
+  - right-click / Esc cancel
+  - toggle mid-drag
+  - watchdog
+  - mask key emitted for Alt/Win
+  - injected events ignored
+- **Protocol integration test:** spawn the real `hook-helper.exe` in a test mode that reads simulated input events from stdin instead of installing hooks, and assert the JSON output.
+- **Manual checklist** before calling v1 done:
+  - Alt+drag over Chrome, Explorer, VS Code and Discord, with no text selection or menu bar activation
+  - Alt+click with the option on and off
+  - toggle hotkey while idle and mid-drag
+  - both monitors at their real scale factors
+  - pings visible in Discord "Screen" share and OBS Display Capture
+  - kill the helper → it auto-restarts
+  - kill Electron → mouse and keyboard are normal
+
+## 11. Out of scope for v1
+
+Multiplayer/sync (rooms arrived in v0.3.0, §12), rebinding wheel slots, colourblind texture sets, per-ping volume, macOS/Linux, ping spam throttling, and a minimap.
+
+macOS support was added in v0.2.0; see [design-macos.md](design-macos.md).
+
+### Linux (X11, experimental)
+
+The Linux port is an X11 backend. Setup, limits and testing are in [linux.md](linux.md). In short:
+
+- XInput 2.1 raw events watch the keyboard. The helper does not read `/dev/input` and does not take keyboard focus.
+- Passive grabs catch the wheel trigger. Normal clicks are passed on with `ReplayPointer`.
+- XTest replays short trigger clicks and tapped trigger keys to the application underneath.
+- Wayland sessions, including XWayland, are refused at start with a `noAccess` error.
+- Electron is forced to scale factor 1 to match X11 root coordinates. There is no updater; updates are manual. Autostart uses an XDG `.desktop` file.
+
+## 12. Rooms (v0.3.0, internet in v0.4.0)
+
+- **Model:** a room is a code, `PING-XXXXX-XXXXX` (Crockford base32, 9 random characters + a Luhn mod 32 check character, `src/shared/roomCode.ts`). Parsing ranks candidates and never glues neighbouring words onto a code; clipboard reads are strict. Every finished ping (wheel or trigger+click, never a settings preview) goes to every member; up to 8 members.
+- **Crypto (`src/main/roomCrypto.ts`):** scrypt(code) → HKDF → AES-256-GCM. Each packet is `[0x01][nonce][ciphertext+tag]`, at most 1200 bytes. Keys never leave the main process.
+- **Messages (`src/shared/roomProtocol.ts`):** `presence` (name, tag colour, `on`/`paused`/`muted`, protocol and app version), `ping` (ping id, display number, x/y as 0–1 fractions), `bye`; v0.5.0 adds `emote` (see §13). Everything is validated field by field; names are stripped of control and bidi characters and shown with `textContent`. A per-peer sequence window plus a ±10 min timestamp check rejects replays. Packets outside that window never touch the member list; they only raise a "clock more than 10 minutes off" hint. The peer ID is random per join, because a peer that said bye stays rejected for the receiver's session.
+- **RoomManager (`src/main/roomManager.ts`):** members, path choice (LAN while alive, else internet), the incoming rate limit (per member, user setting 1–20/s or unlimited), mute (room and per person), timeouts (LAN path alive 6 s and member dropped after 15 s; internet path alive 25 s and member dropped after 30 s), "room is full" 3 s after the relays answer (at most 15 s). It only talks to the network through the `Transport` interface (`src/main/transport.ts`); a `shared` transport gets each packet once, pings over it are capped at 5/s (bursts of 10), and presence at once a second.
+- **LAN transport (`src/main/lanTransport.ts`):** one UDP socket on port 47474. Presence is broadcast every 2 s to 255.255.255.255 and each interface's directed broadcast; pings go unicast to the address a member's packets come from. Before decryption, a flood guard allows 100 packets/s per source IP and 800/s in total, and tracks at most 1024 addresses. The socket is re-bound after sleep.
+- **Mapping:** displays are numbered #1 = primary, then left→right, top→bottom (`src/main/displayNumbers.ts`). A ping lands on the receiver's display with the same number, or #1, at the same fraction of its size. `resolveTarget` is the hook a later share-window mode replaces.
+- **Overlay:** wheel pings are reported back to main (`overlay:pinged`); remote pings carry a name tag. Safety ceiling: 60 pings on screen, 8 overlapping sounds.
+- **Relay transport (v0.4.0, `src/main/relayTransport.ts`):** each sealed packet becomes one ephemeral Nostr event (kind 24747, tag `x` = a topic derived from the code, base64 content), signed with a key made fresh on every join (`src/main/nostrEvent.ts`), and published to every live relay in `src/main/relays.ts`. No WebRTC and no server of our own; members never see each other's IP over it.
+  - `RelayPool` drops copies by event id and caps intake at 200 events/s. `RelayConnection` judges each relay by our own events coming back: no echo for 25 s means down and a reconnect with backoff (2 s → 60 s); `rate-limited` cools it for 30 s; `blocked`/`restricted`/`auth-required`/`pow`/`invalid`, a message over 64 KB or over 400 messages/s retire it for the session.
+  - Status is `ok` while any relay echoes, `unavailable` after 15 s without one (the Room page then offers Retry). "Allow internet connections" off means no relay is contacted; turning it off mid-room sends no bye.
+  - The relay list came from `tools/relay-probe`. Any later list must keep at least 3 of the previous one, or old and new versions can't meet. Development builds read `LOLPING_RELAYS` instead.
+
+## 13. Emotes (v0.5.0)
+
+A second wheel, opened by its own key, places a League emote (a short animation and a sound) the way a ping is placed, and rooms carry it like a ping.
+
+- **Helper, two triggers:** `config` gains `emoteTrigger` (a trigger name or `"off"`), `emoteTriggerVk` and `emoteClick`, and the helper's `ready` version becomes 2. Every `wheelOpen`, `wheelMove`, `wheelRelease` and `click` event carries `wheel`: `"ping"` or `"emote"` (a missing field means `"ping"`, so an older helper still works). A press that both triggers claim, such as Alt and Ctrl held together, is ambiguous and passes through untouched. The emote key defaults to Ctrl, so Ctrl + drag no longer reaches the app underneath while lolPing is on; that is listed under known limitations in the README. It can't be the ping trigger (Caps Lock counts as one key however it was picked) or the pause shortcut's key; a settings file edited by hand into a clash turns the emote key off and shows a problem in About.
+- **Settings:** `emoteTrigger` (default `ctrl`), `emoteClick` (false), `emoteWheel` (8 distinct emote refs, top then clockwise), `clickEmoteId`, `emoteSizePx` (80–300, default 150), `emoteSound` (true) and `customEmotes` (at most 24). An emote ref is a bundled slug or `c:` plus the 32 hex characters of an imported image's hash. The ping and emote wheels share one generic `WheelEditor` in the settings window.
+- **Overlay:** the emote wheel is a second copy of the wheel's SVG with its own centre label. `EmoteStage` (`src/renderer/overlay/emoteFx.ts`) shows the emotes: at most one per owner (`self`, `preview` or a room member's peer ID), each for 3 s. A bundled emote's animated WebP plays once and Chromium gives images with the same URL one shared clock, so the stage fetches each file as a Blob once and gives every spawn its own object URL, revoked when the emote ends. A new emote from an owner replaces their old one on every display: main sends `emote:clear` to the other overlays. Main works out what an emote looks like (`resolveEmoteArt`): bundled, a custom image, or the "?" placeholder for a custom emote whose files are missing here, and the overlay trusts that.
+- **`lolping://emotes/<hash>.webp`, `.anim` and `.sound`:** the custom protocol (`src/main/appProtocol.ts`) serves imported emotes from `<settings folder>/emotes`, in development too. It only answers those three names for a 32-hex hash (`.sound` is the `.sound.ogg`, `.mp3` or `.wav` on disk), never caches (an image can be removed and imported again under the same name), and gives the still when the animation is gone.
+- **Imported emotes (`src/main/emoteLibrary.ts`):** the settings window turns a file into a still of at most 12,288 bytes and 160 px on its longest side (128 px as a fallback), and keeps the original GIF or WebP when it is at most 5 MB and 1024 px. Main checks it all again and names the emote by the first 32 hex characters of the SHA-256 of the still. Files are written through temporary names and renamed together, so a failed import leaves nothing behind.
+- **Imported emote sounds (v0.5.2):** the speaker on one of our own image tiles gives it a sound. The settings window refuses anything but OGG, MP3 or WAV by its first bytes, over 1 MB, or longer than 5 s once decoded; main checks the type and size again (`setSound`) and writes `<hash>.sound.<type>`, deleting one in another format. The entry gets `sound: true` (`normalizeSettings` keeps the flag only when it is `true`, so older settings files read as before). `resolveEmoteArt` adds the sound URL only for our own emotes, so it plays when we place the emote or preview it, under the emote sound setting, and never for a room member's. Sounds never travel: rooms and relays carry nothing new. The overlay loads a sound on its first play and drops loaded custom sounds whenever settings change, since a sound can be replaced under the same URL.
+- **Rooms (`emote` message):** same fields as a ping with an emote ref in place of the ping ID. It follows a ping's routes and checks (paused, room and member mute, update needed, display number), the same incoming limit per member, and over relays the same 5/s, burst-of-10 cap, which pings and emotes share. An unknown but well-formed ref is accepted and shows the placeholder. Members whose presence says an app older than 0.5.0 are marked "Can't see emotes, needs an update".
+- **Custom stills travel (v0.5.2, `src/main/emoteTransfer.ts` and `src/main/emoteCache.ts`):** presence gains `em`, the distinct hashes on the wheel and centre, at most 9 (validated to at most 9 32-hex strings; an app before 0.5.2 just leaves the field out). A member whose announced hash is neither in the library nor the cache asks for it with `want {to, h, need}` and gets the still in `chunk {h, i, n, b}` messages: 750 bytes of base64 per chunk, at most 17 per still, each sealed packet under the 1,200-byte cap. Over LAN chunks go unicast to the requester, two per 100 ms tick and at most eight per tick across the whole room (~60 KB/s egress however many members ask); over relays they are broadcast on the ping bucket but only while five of its ten burst tokens stay, so pings keep their burst and an idle sender streams a still in a few seconds. Wants over relays follow the same rule: joining a room can find 9 hashes per member at once, and the ones without a spare token go on later ticks. want and chunk messages count against their own per-member bucket (60/s), a paused lolPing neither fetches nor serves stills, the room cap is judged on every presence (not only at settle) and one LAN address backs at most two members — a room member cannot grow the room afterwards to farm serving quota. The receiver assembles at most 16 hashes and 256 KB at once, drops an assembly after 60 s or three unanswered re-asks 3 s apart, and keeps a finished one only when it hashes back to its ID and passes the import checks (a still WebP of at most 12,288 bytes and 160 px) — the hash is the identity, so nobody can substitute another member's image, and the bytes are only ever written as `<hash>.webp` in the cache and only ever decoded by Chromium as an `<img>`. The cache (`<settings folder>/emote-cache/`) holds at most 200 stills and 4 MB, evicting least recently used; a still shown on screen counts as used. Its index is read once at launch, which also clears temp files a crashed write left, so a put never lists the folder. Everything is sealed with the room key like every room message. **Show friends' custom emotes** (Settings → Room, `friendEmotes`, default on) stops both directions at once: no wants sent or answered, no chunks taken, pending work dropped, and friends' images show as the placeholder, cached ones included. Animations never travel.
+- **Known limitation (room protocol v1):** every member shares one room key, so a member can forge another member's peer id — a forged `bye` silently removes them from everyone's member list for the session, and a forged high `seq` blocks their later messages. Fixing this needs per-member authentication (a protocol bump); until then a hostile room member can always do this, to pings and emotes as much as to stills.
+- **Baker:** `tools/extract-assets/emote_bake.py` (run with `--emotes`) reads League's emote effect files and bakes each emote at 30 fps on a 320 × 320 canvas holding 256 px of art, as a 3 s animated WebP (quality 80, played once), with an icon PNG and an Opus `.ogg` sound at 96 kbps. It also writes `src/shared/emoteCatalog.ts`, the single list of bundled emotes, and the build leaves out any emote file that list doesn't name.
+
+## 14. Screen assistant
+
+- **Brand:** user-visible titles, settings, answer UI, tray text and package artifacts use lolPingMind-ai. English and Chinese text comes from i18n.ts. The About section credits upstream lolPing and keeps its MIT notice. Internal runtime name, user data directory, application ID, URL scheme and room crypto labels keep their legacy values so changing the visible name does not lose encrypted credentials or break peer compatibility. Electron userData is explicitly pinned to the existing settings directory before readiness.
+- **Fork releases:** package publish is null and canCheckUpdates permits only the explicit update-test URL on Windows/macOS. This fork does not check or install upstream releases. Its own repository, release feed and inherited release workflow require review before publication. The About section labels its link as the upstream project and explains manual updates.
+
+- **Local baseline:** the development checkout keeps a rollback snapshot of the Enemy Missing screenshot assistant before other ping actions were added. Local Git history and rollback tags are excluded from source-only publication. Credentials and generated builds are excluded too.
+- **Action mapping:** `shared/assistantActions.ts` maps Danger → risks, Push → next steps, On My Way → local task, All In → deep analysis, Assist Me → problem solving, Need Vision → extraction, Enemy Missing → explanation, Enemy Vision → source search, Bait → critique, Vision Cleared → cleanup, and Upside-down Missing → translation. Single Generic pings stay ordinary. The mapping is independent of the wheel's order.
+- **Modes:** `assistantMode` accepts `all` (default), `questions` (the baseline Enemy Missing action only) and `off` (classic pings). Existing signal animation, sounds, global input, wheel layout and room packets are unchanged. Only locally placed signals from the overlay's shared event enter the assistant; room signals and settings previews never do.
+- **Provider and gate:** `assistantProvider` defaults to Codex and also accepts DeepSeek. Codex requires its desktop host (ChatGPT.exe on Windows), CLI and sign-in. Windows process checks use PowerShell because tasklist may be denied in the launch environment. DeepSeek needs only the locally saved key. Ordinary network actions check prerequisites before capture. Local tasks capture and save even when neither service is available.
+- **Capture:** `screenCapture.ts` selects the display that owns the ping and crops about 960 × 620 DIPs around the wheel origin after a 1.2-second trailing debounce. The answer window, settings window and target overlay are hidden while the crop is read, then restored. A cleanup revision prevents a window explicitly hidden during capture from being restored afterward. Screen reads are serialized so an automatic crop cannot race the manual selector's hide and restore operations.
+- **Manual selection:** `shared/pingRepeat.ts` detects two consecutive identical local signals on the same display less than 1.2 seconds apart. The second replaces the pending automatic crop and opens one `RegionCapture` window over a frozen, clean display snapshot. All signals support this in all-actions mode; Generic and Vision Cleared fall back to explanation for a repeated pair. The first Vision Cleared still clears immediately. Questions-only and classic modes retain their limits. The selector supports reverse drawing, dragging, eight resize handles, reset, Enter/confirm and Esc/right-click cancellation. It never sends its border, controls or a ping in the crop: main crops the original image only after validating finite, in-bounds DIPs and mapping them to the actual thumbnail pixels. On cancel there is no automatic fallback or network request for that pair. Extra signals while selection is open are ignored. The selected image enters the existing single-pending queue; choosing it does not interrupt an earlier answer.
+- **Selection lifecycle:** the selector is the only focusable capture window. The native helper is suspended only during explicit selection, sharing the suspend state with settings key capture; unrelated keys and drags still pass through outside selection. Completion, cancellation, renderer failure, app pause, mode change, shutdown or removal/DPI change of the target display closes selection and restores input. A cancellation signal suppresses late captures. Screenshot IPC is scoped to this selector's main frame and page. The full display snapshot stays in memory and only the confirmed crop reaches an answer service or local task storage. The renderer has no filesystem or key access.
+- **Queue:** at most one action is active and one is pending. Rapid marks combine using the latest action, location and options. Marks received during a request update one pending follow-up. Rerunning an existing screenshot uses the same queue without another screen capture. The selected provider is read when a request starts. Deleting an active entry or clearing the workspace aborts it. An epoch check suppresses late capture, search and answer callbacks after cancellation.
+- **Prompts:** action names, hints, visible requests and prompts are localized in i18n.ts. Enemy Missing retains exactly “这个截图里的内容是什么意思” in Chinese. Other actions have separate prompts, extraction format (text/Markdown/CSV/LaTeX) and translation target (automatic/Chinese/English). The model gives advice and content; it does not execute operations on the user's behalf.
+- **Codex:** codex exec starts one dedicated session in a read-only temporary workspace; exec resume reuses the saved ID. Both commands allow the temporary directory to be outside Git and ignore user config while retaining account auth. GPT-6 Luna uses low reasoning normally and high reasoning only for All In. Temporary JPEGs are removed after a turn. The default deadline is 180 seconds; optional task-title generation is limited to eight seconds.
+- **DeepSeek:** DeepSeekClient uses Electron net.fetch to POST the current crop and prompt to https://api.deepseek.com/chat/completions with deepseek-flash. Ordinary actions disable thinking and use a 60-second deadline. All In enables thinking with high effort and a 120-second deadline. Output tokens are bounded per action; extraction and deep analysis allow 4096. Only answer deltas enter the UI, throttled to roughly 10 updates per second. Requests have no redirects or automatic retries. Typed failures hide raw server bodies and keys.
+- **Keys:** AssistantKeyStore encrypts each user's own key with Electron safeStorage into deepseek-api-key.enc under the local settings directory. Writes, replacement and deletion are serialized. Encryption must be available, including a real keyring on Linux. No plaintext fallback or bundled key exists. Renderers receive only deepseekKeySet; settings.json, broadcasts, logs and room packets contain no key. The settings connection check calls https://api.deepseek.com/models without a screenshot.
+- **Source search:** Enemy Vision first asks the selected model for a short query, then AssistantSources searches Wikipedia summaries and Crossref publication records concurrently, with per-request deadlines and bounded JSON responses. Hosts are en.wikipedia.org, zh.wikipedia.org (Chinese UI) and api.crossref.org. Only the query goes to those services; no API Key or screenshot does. Candidate records are then supplied to the answer service with the crop. IDs and source links are constructed from validated page IDs and DOIs, never from model URLs. The UI explicitly labels these as leads, distinguishes metadata from full-text evidence, and handles partial provider failure or no matches. A source button opens only a URL already attached to that entry.
+- **Tasks:** AssistantTodos saves up to 100 task records under assistant-todos/index.json and cropped JPEGs under validated UUID filenames. Metadata is normalized on load and written atomically; mutations are serialized. A corrupt index is reported instead of overwritten. On My Way saves a default editable task immediately, then optionally asks the selected service for a short title for at most eight seconds. A title edited during that request takes priority. Completion and renaming persist; deleting a task removes its crop too. Only a selected task's image enters UI state, keeping broadcasts bounded. History/workspace cleanup does not remove tasks.
+- **Cleanup:** Vision Cleared cancels pending and active work, removes visible marks on this computer and hides the answer window. An overlay-only clearMarks channel also clears local emote resources. It does not change room peers, settings, keyboard hooks or saved tasks.
+- **Window:** history keeps up to 24 session entries, with action icons, contextual titles, filters, copy and deletion. A short preview is derived from the answer or search query without another model call. A task tab offers persisted crops, editable titles and completion. The same screenshot can be reused for another action. A running action raises and focuses the window once after capture and keeps it above other windows until completion; streamed updates do not refocus it. Settings can open the assistant without taking a screenshot. The preload is restricted and external navigation is blocked.
+- **Rendering and clipboard:** a display-only Markdown subset supports paragraphs, headings, lists, tables and code. HTML is React-escaped; model links are text. Extracted text/CSV/LaTeX have a raw preview, and copying removes only a whole-output code fence. Clipboard writes use the selected entry held in the main process, not arbitrary renderer text.
+- **Windows checks:** build.cmd selects UTF-8 source encoding and the conforming MSVC preprocessor so raw-string test fixtures work consistently. Native behavior tests remain independent of Electron.

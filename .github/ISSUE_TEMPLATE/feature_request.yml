@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest something lolPing should do (English or Chinese is fine, 中英文均可)
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What do you want to do that you can't now?
+      description: Describe the situation first, then the idea.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What should lolPing do?
+      description: How it would work for you. How League does it, if it does.
+    validations:
+      required: true
+  - type: dropdown
+    id: pr
+    attributes:
+      label: Will you send a pull request?
+      options:
+        - No, just suggesting
+        - Yes
+    validations:
+      required: true

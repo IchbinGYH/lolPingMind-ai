@@ -1,0 +1,42 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #101217; }
+body { font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; color: #f4f6ff; user-select: none; }
+.captureStage { position: fixed; inset: 0; overflow: hidden; cursor: crosshair; }
+.captureImage { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.captureShade { position: absolute; inset: 0; background: #0609149c; pointer-events: none; }
+.captureSelection { position: absolute; outline: 2px solid #91a1ff; box-shadow: 0 0 0 10000px #0609149c; cursor: move; }
+.captureSelection[hidden], .captureShade[hidden] { display: none; }
+.captureSelection::before, .captureSelection::after { content: ''; position: absolute; background: #aebaff75; pointer-events: none; }
+.captureSelection::before { top: 0; bottom: 0; left: 50%; width: 1px; }
+.captureSelection::after { left: 0; right: 0; top: 50%; height: 1px; }
+.captureSize { position: absolute; top: -32px; left: 0; padding: 5px 9px; border-radius: 6px; background: #161b2fee;
+  font-size: 12px; white-space: nowrap; pointer-events: none; }
+.captureSize.inside { top: 8px; left: 8px; }
+.captureHandle { position: absolute; width: 10px; height: 10px; background: #f4f6ff; border: 2px solid #7e8fff; border-radius: 2px; }
+.captureHandle[data-handle='nw'] { left: -5px; top: -5px; cursor: nwse-resize; }
+.captureHandle[data-handle='n'] { left: calc(50% - 5px); top: -5px; cursor: ns-resize; }
+.captureHandle[data-handle='ne'] { right: -5px; top: -5px; cursor: nesw-resize; }
+.captureHandle[data-handle='e'] { right: -5px; top: calc(50% - 5px); cursor: ew-resize; }
+.captureHandle[data-handle='se'] { right: -5px; bottom: -5px; cursor: nwse-resize; }
+.captureHandle[data-handle='s'] { left: calc(50% - 5px); bottom: -5px; cursor: ns-resize; }
+.captureHandle[data-handle='sw'] { left: -5px; bottom: -5px; cursor: nesw-resize; }
+.captureHandle[data-handle='w'] { left: -5px; top: calc(50% - 5px); cursor: ew-resize; }
+.captureHeading { position: absolute; left: 50%; top: 24px; transform: translateX(-50%); text-align: center;
+  width: max-content; max-width: calc(100% - 48px); padding: 14px 24px; border: 1px solid #9baaff30;
+  border-radius: 14px; background: #151928ed; box-shadow: 0 8px 28px #0005; pointer-events: none; }
+.captureTitle { font-size: 16px; letter-spacing: .3px; }
+.captureTitle::before { content: ''; display: inline-block; width: 12px; height: 12px; border: 2px solid #a6a2ff;
+  border-radius: 3px; margin-right: 10px; vertical-align: -1px; }
+.captureHint { margin: 6px 0 0; color: #b4bfd6; font-size: 12px; }
+.captureToolbar { position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%); display: flex;
+  align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px; max-width: calc(100% - 32px); width: max-content;
+  padding: 10px; border: 1px solid #9baaff40; border-radius: 14px; background: #151928f5; box-shadow: 0 8px 36px #0007; cursor: default; }
+.captureKeys { color: #aeb9d2; font-size: 12px; padding: 0 10px 0 4px; }
+.captureButton { font: inherit; font-size: 13px; padding: 9px 15px; color: #e4e8fa; background: #ffffff09;
+  border: 1px solid #c3ccf12b; border-radius: 8px; cursor: pointer; }
+.captureButton:hover { background: #ffffff15; }
+.captureButton.primary { background: #7775eb; border-color: #a3a1ff; color: white; }
+.captureButton.primary:hover { background: #8987fa; }
+.captureButton:disabled { opacity: .38; cursor: default; }
+.captureButton:focus-visible { outline: 2px solid #c3ccff; outline-offset: 3px; }
+.drawing .captureHeading, .drawing .captureKeys { opacity: .45; }

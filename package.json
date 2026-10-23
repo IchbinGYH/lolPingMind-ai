@@ -1,0 +1,111 @@
+{
+  "name": "lolping",
+  "productName": "lolPingMind-ai",
+  "version": "0.5.1",
+  "private": true,
+  "description": "AI screen assistant with gesture pings, screenshot explanations, extraction and translation; based on lolPing",
+  "author": "lolPingMind-ai contributors",
+  "license": "MIT",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build:helper": "node native/hook-helper/run.mjs build",
+    "test:helper": "node native/hook-helper/run.mjs test",
+    "dist": "npm run build:helper && electron-vite build && electron-builder --win --publish never",
+    "dist:mac": "npm run build:helper && electron-vite build && electron-builder --mac --arm64 --publish never",
+    "dev:site": "vite --config site/vite.config.ts",
+    "build:site": "vite build --config site/vite.config.ts",
+    "media": "npm run build:site && electron tools/capture-media/capture.mjs",
+    "dist:linux": "npm run build:helper && electron-vite build && electron-builder --linux --publish never",
+    "test:linux-input": "python3 native/hook-helper/tests/linux_x11_test.py"
+  },
+  "devDependencies": {
+    "@fluentui/react-components": "9.74.9",
+    "@fluentui/react-icons": "2.0.343",
+    "@noble/secp256k1": "3.2.0",
+    "@types/node": "22.20.4",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@types/ws": "8.18.2",
+    "@vitejs/plugin-react": "5.2.0",
+    "electron": "44.5.1",
+    "electron-builder": "26.15.3",
+    "electron-updater": "6.8.10",
+    "electron-vite": "5.0.0",
+    "esbuild": "0.25.12",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "typescript": "5.9.3",
+    "vite": "7.3.6",
+    "vitest": "5.0.3",
+    "ws": "8.22.0"
+  },
+  "build": {
+    "appId": "com.lolping.app",
+    "productName": "lolPingMind-ai",
+    "directories": { "output": "release", "buildResources": "build" },
+    "files": ["out/**/*", "package.json"],
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "icon": "build/icon.ico",
+      "extraResources": [{ "from": "native/hook-helper/build/hook-helper.exe", "to": "hook-helper.exe" }]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "lolPingMind-ai-Setup-${version}.exe",
+      "include": "build/installer.nsh"
+    },
+    "mac": {
+      "minimumSystemVersion": "13.0",
+      "target": [{ "target": "dmg", "arch": ["arm64"] }],
+      "icon": "build/icon.png",
+      "category": "public.app-category.utilities",
+      "identity": "-",
+      "hardenedRuntime": false,
+      "extraResources": [
+        { "from": "native/hook-helper/build/hook-helper", "to": "hook-helper" },
+        { "from": "build", "to": ".", "filter": ["tray*Template*.png"] }
+      ],
+      "extendInfo": {
+        "NSAccessibilityUsageDescription": "lolPingMind-ai reads the mouse and keyboard to open the ping wheel or the emote wheel when you hold its key and drag.",
+        "NSDownloadsFolderUsageDescription": "lolPingMind-ai saves update downloads to your Downloads folder.",
+        "NSLocalNetworkUsageDescription": "lolPingMind-ai finds the other people in your room on the local network and sends them your pings."
+      }
+    },
+    "dmg": { "artifactName": "lolPingMind-ai-${version}-arm64.dmg" },
+    "publish": null,
+    "linux": {
+      "target": [{ "target": "AppImage", "arch": ["x64"] }, { "target": "deb", "arch": ["x64"] }],
+      "icon": "build/icon.png",
+      "category": "Utility",
+      "artifactName": "lolPingMind-ai-${version}-${arch}.${ext}",
+      "extraResources": [{ "from": "native/hook-helper/build/hook-helper", "to": "hook-helper" }],
+      "desktop": { "entry": { "StartupWMClass": "lolping" } },
+      "maintainer": "lolPingMind-ai contributors",
+      "syncDesktopName": true
+    },
+    "deb": {
+      "depends": [
+        "libgtk-3-0",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "libxi6",
+        "libx11-6",
+        "libasound2",
+        "libgbm1",
+        "libnotify4",
+        "libsecret-1-0",
+        "libatspi2.0-0"
+      ]
+    }
+  },
+  "engines": { "node": ">=22.12.0" },
+  "desktopName": "lolping.desktop"
+}
